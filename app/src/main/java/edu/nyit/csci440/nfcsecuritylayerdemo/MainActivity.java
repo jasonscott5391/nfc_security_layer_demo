@@ -1,16 +1,19 @@
 package edu.nyit.csci440.nfcsecuritylayerdemo;
 
+import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.graphics.Point;
-import android.support.v7.app.ActionBarActivity;
+import android.nfc.NdefMessage;
+import android.nfc.NfcAdapter;
+import android.nfc.NfcEvent;
 import android.os.Bundle;
+import android.os.Parcelable;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
-import android.view.ViewGroup;
-import android.widget.ListView;
-import android.widget.RelativeLayout;
+import android.widget.EditText;
 import android.widget.TextView;
 
 import java.io.InputStream;
@@ -19,18 +22,14 @@ import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 
 
-public class MainActivity extends ActionBarActivity {
-
-    private RelativeLayout mStatusLayout;
-
-    private RelativeLayout mHistoryLayout;
+public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessageCallback,
+        NfcAdapter.OnNdefPushCompleteCallback {
 
     private TextView mStatusTextView;
-
-    private ListView mHistoryListView;
 
     private Point mDimension;
 
@@ -46,6 +45,14 @@ public class MainActivity extends ActionBarActivity {
 
     private boolean mTrust = false;
 
+    private static final String SNFC = " SNFC>";
+
+    private byte[] mData;
+
+    private NfcAdapter mNfcAdapter;
+
+    private static final int MESSAGE_SENT = 1;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -55,34 +62,104 @@ public class MainActivity extends ActionBarActivity {
         mDimension = new Point();
         getWindowManager().getDefaultDisplay().getSize(mDimension);
 
-        mStatusLayout = (RelativeLayout) findViewById(R.id.status_layout);
-        mHistoryLayout = (RelativeLayout) findViewById(R.id.history_layout);
-
-        RelativeLayout.LayoutParams statusLayoutParams =
-                new RelativeLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (mDimension.y / 2));
-
-        RelativeLayout.LayoutParams historyLayoutParams =
-                new RelativeLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (mDimension.y / 2));
-        historyLayoutParams.addRule(RelativeLayout.BELOW, R.id.status_layout);
-
-        mStatusLayout.setLayoutParams(statusLayoutParams);
-        mHistoryLayout.setLayoutParams(historyLayoutParams);
-
         mStatusTextView = (TextView) findViewById(R.id.nfc_status);
-        mHistoryListView = (ListView) findViewById(R.id.nfc_history);
 
+        mNfcAdapter = NfcAdapter.getDefaultAdapter(this);
+
+        if (mNfcAdapter == null) {
+            mStatusTextView.setText("NFC is not available on this device.");
+        } else {
+            // Register callback to set NDEF message
+            mNfcAdapter.setNdefPushMessageCallback(this, this);
+            // Register callback to listen for message-sent success
+            mNfcAdapter.setOnNdefPushCompleteCallback(this, this);
+        }
+
+        printConsole(" initializing...");
         initCertificates();
 
+        printConsole("verifying CA certificate...");
         verifyCertificateAuthority();
+
+        printConsole("verifying device certificate...");
         verifyUserCertificate();
 
         setUserPrivateKey();
+    }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+
+        printConsole(" waiting...");
+        if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(getIntent().getAction())) {
+            processIntent(getIntent());
+        }
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        // Inflate the menu; this adds items to the action bar if it is present.
+        getMenuInflater().inflate(R.menu.menu_main, menu);
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+
+        switch (item.getItemId()) {
+            case R.id.action_attach:
+                viewDataTextDialog();
+                break;
+
+            case R.id.action_view_ca:
+                if (mCaCertificate != null) {
+                    viewCertificateAuthorityDialog();
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        return super.onOptionsItemSelected(item);
+    }
+
+    @Override
+    public NdefMessage createNdefMessage(NfcEvent event) {
+        byte[] messageData = packageSecureMessage();
+        return null;
+    }
+
+    @Override
+    public void onNdefPushComplete(NfcEvent event) {
+        printConsole(" attachment sent...");
+    }
+
+    @Override
+    public void onNewIntent(Intent intent) {
+        // onResume gets called after this to handle the intent
+        setIntent(intent);
+    }
+
+    /**
+     * Parses the NDEF Message from the intent and prints to the TextView
+     */
+    void processIntent(Intent intent) {
+        Parcelable[] rawMsgs = intent.getParcelableArrayExtra(
+                NfcAdapter.EXTRA_NDEF_MESSAGES);
+        // only one message sent during the beam
+        NdefMessage msg = (NdefMessage) rawMsgs[0];
+        // record 0 contains the MIME type, record 1 is the AAR, if present
+        //TODO (jasonscott) Securely unpack message.
+        //TODO (jasonscott) Print message to textview.
+//        mInfoText.setText(new String(msg.getRecords()[0].getPayload()));
     }
 
     /**
      * Load CA certificate, create KeyStore with user KeyStore, and
      * load user certificate.
+     *
      * @throws Exception
      */
     private void initCertificates() {
@@ -110,6 +187,7 @@ public class MainActivity extends ActionBarActivity {
         try {
             mCaCertificate.verify(mCaCertificate.getPublicKey());
             setCaCertificate();
+            printConsole("CA certificate verified...");
         } catch (Exception e) {
             Log.e("verifyCertificateAuthority", e.getMessage());
 
@@ -122,6 +200,7 @@ public class MainActivity extends ActionBarActivity {
     private void verifyUserCertificate() {
         try {
             mUserCertificate.verify(mCaCertificate.getPublicKey());
+            printConsole("device certificate verified...");
         } catch (Exception e) {
             Log.e("verifyUserCertificate", e.getMessage());
 
@@ -152,6 +231,7 @@ public class MainActivity extends ActionBarActivity {
 
     /**
      * Returns a digital signature of the specified data with the users private key.
+     *
      * @param data Specified data.
      * @return Digital Signatures in bytes.
      */
@@ -173,9 +253,10 @@ public class MainActivity extends ActionBarActivity {
     /**
      * Verifies that the specified digital signature, was signed with the specified certificate, and
      * matches the specified plain data.
+     *
      * @param certificate Specified certificate.
-     * @param data Specified data.
-     * @param signedData Specified signedData.
+     * @param data        Specified data.
+     * @param signedData  Specified signedData.
      * @return Whether the digital signature is valid.
      */
     private boolean verifySignedData(Certificate certificate, byte[] data, byte[] signedData) {
@@ -195,32 +276,13 @@ public class MainActivity extends ActionBarActivity {
         return valid;
     }
 
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu) {
-        // Inflate the menu; this adds items to the action bar if it is present.
-        getMenuInflater().inflate(R.menu.menu_main, menu);
-        return true;
-    }
+    private byte[] packageSecureMessage() {
+        byte[] data = null;
+        //TODO (jasonscott) Design message format so that app knows how to dismantle.
+        //TODO (jasonscott) CA cert, SignedData, and data;
+        String message = mCaCertificate.toString();
 
-    @Override
-    public boolean onOptionsItemSelected(MenuItem item) {
-
-        switch (item.getItemId()) {
-            case R.id.action_attach:
-                //TODO (jasonscott) Choose file for attachment.
-                break;
-
-            case R.id.action_view_ca:
-                if (mCaCertificate != null) {
-                    viewCertificateAuthorityDialog();
-                }
-                break;
-
-            default:
-                break;
-        }
-
-        return super.onOptionsItemSelected(item);
+        return data;
     }
 
     /**
@@ -248,14 +310,55 @@ public class MainActivity extends ActionBarActivity {
                 .setPositiveButton("Yes", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                       mTrust = true;
+                        printConsole(" attachment verified...");
                     }
                 })
                 .setNegativeButton("No", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        mTrust = false;
+                        printConsole(" attachment invalid, discarding...");
                     }
                 }).show();
+
     }
+
+    private void viewDataTextDialog() {
+        final EditText dataText = new EditText(this);
+
+        final AlertDialog alertDialog = new AlertDialog.Builder(this)
+                .setTitle("Data Entry")
+                .setMessage("Enter data...")
+                .setView(dataText)
+                .setPositiveButton("Enter", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        String dataString = dataText.getText().toString();
+                        if (dataString != null || !dataString.equals("")) {
+                            mData = dataText.getText().toString().getBytes();
+                            printConsole(" securing attachment...");
+                        }
+                    }
+                }).setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        printConsole(" waiting...");
+                    }
+                }).show();
+
+    }
+
+    private String getDateTimeStamp() {
+        SimpleDateFormat format =
+                new SimpleDateFormat("MM-dd-yy hh:mm:ss");
+        Date date = new Date();
+
+        return format.format(date);
+    }
+
+    private void printConsole(String message) {
+        String text = mStatusTextView.getText().toString();
+        text += "\n" + getDateTimeStamp() + SNFC + message;
+        mStatusTextView.setText(text);
+    }
+
 }

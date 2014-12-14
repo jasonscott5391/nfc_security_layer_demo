@@ -6,10 +6,10 @@
         android:id="@+id/action_attach"
         android:icon="@drawable/ic_menu_attachment"
         android:title="@string/action_attach"
-        app:showAsAction="always"/>
+        app:showAsAction="collapseActionView"/>
     <item
         android:id="@+id/action_view_ca"
         android:icon="@drawable/ic_action_list"
         android:title="@string/action_view_ca"
-        app:showAsAction="always" />
+        app:showAsAction="collapseActionView" />
 </menu>
