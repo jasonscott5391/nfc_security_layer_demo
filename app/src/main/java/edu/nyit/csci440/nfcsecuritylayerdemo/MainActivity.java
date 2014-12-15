@@ -4,18 +4,26 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Point;
 import android.nfc.NdefMessage;
+import android.nfc.NdefRecord;
 import android.nfc.NfcAdapter;
 import android.nfc.NfcEvent;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Message;
 import android.os.Parcelable;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.security.KeyStore;
 import java.security.PrivateKey;
@@ -23,6 +31,7 @@ import java.security.Signature;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.text.SimpleDateFormat;
+import java.util.Arrays;
 import java.util.Date;
 
 
@@ -47,12 +56,23 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
 
     private static final String SNFC = " SNFC>";
 
+    private String mAlias;
+
+    private String mPassword;
+
     private byte[] mData;
+
+    private byte[] mSecuredData;
 
     private NfcAdapter mNfcAdapter;
 
     private static final int MESSAGE_SENT = 1;
 
+    private SharedPreferences mSharedPreferences;
+
+    private static final int CERT_LEN = 1006;
+
+    private static final int SIG_LEN = 256;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -75,26 +95,42 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
             mNfcAdapter.setOnNdefPushCompleteCallback(this, this);
         }
 
-        printConsole(" initializing...");
-        initCertificates();
-
-        printConsole("verifying CA certificate...");
-        verifyCertificateAuthority();
-
-        printConsole("verifying device certificate...");
-        verifyUserCertificate();
-
-        setUserPrivateKey();
+        //TODO (jasonscott) Login dialog at start.  Device A or Device B.
+        //TODO (jasonscott) Logout in menu to bring login dialog up and restart the activity.
     }
 
     @Override
     protected void onResume() {
         super.onResume();
 
-        printConsole(" waiting...");
+        mSharedPreferences = getSharedPreferences("user_preferences", 0);
+        mAlias = mSharedPreferences.getString("alias", null);
+        mPassword = mSharedPreferences.getString("password", null);
+        String history = mSharedPreferences.getString("history", null);
+
+        if (history != null) {
+            mStatusTextView.setText(history);
+        }
+
+        if (mAlias == null || mPassword == null) {
+            viewLoginDialog();
+        } else {
+            initialize();
+        }
+
         if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(getIntent().getAction())) {
             processIntent(getIntent());
         }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        SharedPreferences.Editor preferencesEditor = mSharedPreferences.edit();
+        preferencesEditor.putString("alias", mAlias);
+        preferencesEditor.putString("password", mPassword);
+        preferencesEditor.putString("history", mStatusTextView.getText().toString());
+        preferencesEditor.apply();
     }
 
     @Override
@@ -118,6 +154,11 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
                 }
                 break;
 
+            case R.id.action_login:
+                mAlias = null;
+                mPassword = null;
+                mStatusTextView.setText("");
+                this.recreate();
             default:
                 break;
         }
@@ -127,14 +168,36 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
 
     @Override
     public NdefMessage createNdefMessage(NfcEvent event) {
-        byte[] messageData = packageSecureMessage();
-        return null;
+        NdefMessage ndefMessage = null;
+        if (mSecuredData != null) {
+            ndefMessage = new NdefMessage(NdefRecord.createMime(
+                    "application/edu.nyit.csci440.nfcsecuritylayerdemo",
+                    mSecuredData)
+//                    , NdefRecord.createApplicationRecord("edu.nyit.csci440.nfcsecuritylayerdemo")
+            );
+        }
+        return ndefMessage;
     }
 
     @Override
     public void onNdefPushComplete(NfcEvent event) {
         printConsole(" attachment sent...");
+        mHandler.obtainMessage(MESSAGE_SENT).sendToTarget();
     }
+
+    /**
+     * This handler receives a message from onNdefPushComplete
+     */
+    private final Handler mHandler = new Handler() {
+        @Override
+        public void handleMessage(Message msg) {
+            switch (msg.what) {
+                case MESSAGE_SENT:
+                    Toast.makeText(getApplicationContext(), "Message sent!", Toast.LENGTH_LONG).show();
+                    break;
+            }
+        }
+    };
 
     @Override
     public void onNewIntent(Intent intent) {
@@ -151,9 +214,25 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
         // only one message sent during the beam
         NdefMessage msg = (NdefMessage) rawMsgs[0];
         // record 0 contains the MIME type, record 1 is the AAR, if present
-        //TODO (jasonscott) Securely unpack message.
-        //TODO (jasonscott) Print message to textview.
-//        mInfoText.setText(new String(msg.getRecords()[0].getPayload()));
+        unpackSecuredNdef(msg);
+    }
+
+    private void initialize() {
+        printConsole(" initializing...");
+        initCertificates();
+
+        printConsole("verifying CA certificate...");
+        verifyCertificateAuthority();
+
+        printConsole("verifying device certificate...");
+        verifyUserCertificate();
+
+        setUserPrivateKey();
+
+        printConsole(" waiting...");
+        if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(getIntent().getAction())) {
+            processIntent(getIntent());
+        }
     }
 
     /**
@@ -171,9 +250,16 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
             mKeyStore = KeyStore.getInstance("PKCS12");
             mKeyStore.load(null);
 
-            InputStream inputStream = getResources().openRawResource(R.raw.devicebkeystore);
-            mKeyStore.load(inputStream, "deviceb".toCharArray());
-            mUserCertificate = mKeyStore.getCertificate("deviceb");
+            int resId;
+            if (mAlias.equals("devicea")) {
+                resId = R.raw.deviceakeystore;
+            } else {
+                resId = R.raw.devicebkeystore;
+            }
+
+            InputStream inputStream = getResources().openRawResource(resId);
+            mKeyStore.load(inputStream, mPassword.toCharArray());
+            mUserCertificate = mKeyStore.getCertificate(mAlias);
 
         } catch (Exception e) {
             Log.e("initCertificates", e.getMessage());
@@ -190,7 +276,7 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
             printConsole("CA certificate verified...");
         } catch (Exception e) {
             Log.e("verifyCertificateAuthority", e.getMessage());
-
+            printConsole("CA certificate corrupted or invalid, remove this application...");
         }
     }
 
@@ -203,7 +289,18 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
             printConsole("device certificate verified...");
         } catch (Exception e) {
             Log.e("verifyUserCertificate", e.getMessage());
+            printConsole("This users certificate is corrupted or invalid, you will be logged out...");
+            this.recreate();
+        }
+    }
 
+    private void verifyOtherUserCertificate() {
+        try {
+            mOtherPartyCertificate.verify(mCaCertificate.getPublicKey());
+            printConsole("device certificate verified...");
+        } catch (Exception e) {
+            Log.e("verifyUserCertificate", e.getMessage());
+            printConsole(" This other users certificate is corrupted or invalid, message discarded...");
         }
     }
 
@@ -223,7 +320,7 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
      */
     private void setUserPrivateKey() {
         try {
-            mPrivateKey = (PrivateKey) mKeyStore.getKey("deviceb", "deviceb".toCharArray());
+            mPrivateKey = (PrivateKey) mKeyStore.getKey(mAlias, mPassword.toCharArray());
         } catch (Exception e) {
             Log.e("getUserPrivateKey", e.getMessage());
         }
@@ -238,6 +335,8 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
     private byte[] signData(byte[] data) {
         byte[] signedData = null;
         try {
+
+            printConsole(" Signing data...");
             Signature signature = Signature.getInstance("SHA256withRSA");
             signature.initSign(mPrivateKey);
             signature.update(data);
@@ -263,7 +362,7 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
         boolean valid = false;
 
         try {
-
+            printConsole(" Verifying digital signature...");
             Signature signature = Signature.getInstance("SHA256withRSA");
             signature.initVerify(certificate);
             signature.update(data);
@@ -271,18 +370,103 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
 
         } catch (Exception e) {
             Log.e("verifySignedData", e.getMessage());
+            printConsole(" Digital signature corrupted or invalid...");
         }
 
         return valid;
     }
 
-    private byte[] packageSecureMessage() {
-        byte[] data = null;
-        //TODO (jasonscott) Design message format so that app knows how to dismantle.
-        //TODO (jasonscott) CA cert, SignedData, and data;
-        String message = mCaCertificate.toString();
+    /**
+     * Returns the concatenated user certificate, digital signature,
+     * and data.
+     *
+     * @return Byte array of data package.
+     */
+    private byte[] packageData() {
+        ByteArrayOutputStream byteStream = null;
 
-        return data;
+        printConsole(" Packaging attachment...");
+
+        if (mData != null) {
+            try {
+
+                byteStream = new ByteArrayOutputStream();
+
+                byte[] userCertEncoded = mUserCertificate.getEncoded();
+                byte[] signature;
+                signature = signData(mData);
+
+                byteStream.write(userCertEncoded);
+                byteStream.write(signature);
+                byteStream.write(mData);
+
+            } catch (Exception e) {
+                Log.e("createNdefMessage", e.getMessage());
+            }
+        }
+
+        return byteStream.toByteArray();
+    }
+
+    /**
+     * Unpacks the specified Secured Ndef message and verifies sender and data.
+     *
+     * @param ndefMessage The specified Ndef message.
+     */
+    private void unpackSecuredNdef(NdefMessage ndefMessage) {
+        try {
+            byte[] payload = ndefMessage.getRecords()[0].getPayload();
+            int payloadLen = payload.length;
+            byte[] otherPartyCert = Arrays.copyOfRange(payload, 0, CERT_LEN);
+            byte[] signature = Arrays.copyOfRange(payload, CERT_LEN, (CERT_LEN + SIG_LEN));
+            byte[] data = Arrays.copyOfRange(payload, (CERT_LEN + SIG_LEN), payloadLen);
+
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            mOtherPartyCertificate = cf.generateCertificate(new ByteArrayInputStream(otherPartyCert));
+            verifyOtherUserCertificate();
+
+            verifySignedData(mOtherPartyCertificate, data, signature);
+
+            String message = new String(data, "UTF-8");
+            printConsole(message);
+
+        } catch (Exception e) {
+            Log.e("unpackSecureNdef", e.getMessage());
+        }
+    }
+
+    /**
+     * Displays a dialog to login accepting the correct
+     * alias and password combination.
+     */
+    private void viewLoginDialog() {
+
+
+        LinearLayout linearLayout = new LinearLayout(this);
+        linearLayout.setOrientation(LinearLayout.VERTICAL);
+        final EditText aliasEditText = new EditText(this);
+        aliasEditText.setHint("Alias");
+        final EditText passwordEditText = new EditText(this);
+        passwordEditText.setHint("Password");
+
+        linearLayout.addView(aliasEditText);
+        linearLayout.addView(passwordEditText);
+
+        final AlertDialog loginDialog = new AlertDialog.Builder(this)
+                .setTitle("Login")
+                .setView(linearLayout)
+                .setNeutralButton("Enter", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        String alias = aliasEditText.getText().toString();
+                        String password = passwordEditText.getText().toString();
+                        if (alias != null && password != null) {
+                            mAlias = alias;
+                            mPassword = password;
+                            initialize();
+                        }
+                    }
+                }).show();
     }
 
     /**
@@ -301,7 +485,7 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
     }
 
     /**
-     * Shows the dialog for the
+     * Shows a dialog viewing the certificate in the secure ndef message.
      */
     private void viewCertificateDialog(Certificate certificate) {
         final AlertDialog alertDialog = new AlertDialog.Builder(this)
@@ -322,6 +506,9 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
 
     }
 
+    /**
+     * Creates dialog for getting user input message.
+     */
     private void viewDataTextDialog() {
         final EditText dataText = new EditText(this);
 
@@ -335,7 +522,7 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
                         String dataString = dataText.getText().toString();
                         if (dataString != null || !dataString.equals("")) {
                             mData = dataText.getText().toString().getBytes();
-                            printConsole(" securing attachment...");
+                            mSecuredData = packageData();
                         }
                     }
                 }).setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
@@ -347,6 +534,11 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
 
     }
 
+    /**
+     * Returns a formatted String for the current date and time.
+     *
+     * @return Current date and time.
+     */
     private String getDateTimeStamp() {
         SimpleDateFormat format =
                 new SimpleDateFormat("MM-dd-yy hh:mm:ss");
@@ -355,6 +547,11 @@ public class MainActivity extends Activity implements NfcAdapter.CreateNdefMessa
         return format.format(date);
     }
 
+    /**
+     * Outputs the specified message to status console on device.
+     *
+     * @param message The specified message.
+     */
     private void printConsole(String message) {
         String text = mStatusTextView.getText().toString();
         text += "\n" + getDateTimeStamp() + SNFC + message;

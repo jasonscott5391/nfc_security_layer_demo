@@ -4,5 +4,6 @@
     <string name="app_name">NFC Security Layer Demo</string>
     <string name="action_attach">Attach</string>
     <string name="action_view_ca">View CA</string>
+    <string name="action_log_out">Logout</string>
 
 </resources>
